@@ -1,0 +1,5 @@
+rag_qa_app/app.log
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

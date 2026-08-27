@@ -1,4 +1,6 @@
 import os
+import sys
+import logging
 import streamlit as st
 import pandas as pd
 from langchain_community.vectorstores import FAISS
@@ -8,6 +10,21 @@ from langchain_core.documents import Document
 from transformers import pipeline
 import warnings
 warnings.filterwarnings("ignore")
+
+# Logging: shares app.log with app.py so both apps' activity can be tailed
+# from one place during a demo.
+LOG_FILE = "app.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+    force=True,
+)
+logger = logging.getLogger("rag_qa_app.fast")
 
 # Set page config
 st.set_page_config(page_title="Fast Bhagavad Gita Q&A", page_icon="🕉️", layout="wide")
@@ -27,17 +44,21 @@ def load_fast_vectorstore():
     try:
         # Check if index exists
         if os.path.exists(INDEX_DIR):
+            logger.info("Existing FAISS index found at %s. Loading...", INDEX_DIR)
             embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
             vectorstore = FAISS.load_local(INDEX_DIR, embeddings, allow_dangerous_deserialization=True)
+            logger.info("FAISS index loaded successfully.")
             return vectorstore
 
         # Load CSV data
         csv_path = os.path.join(DATA_DIR, "bhagavad_gita_verses.csv")
         if not os.path.exists(csv_path):
+            logger.error("CSV file not found at %s", csv_path)
             st.error("❌ CSV file not found!")
             return None
-        
+
         df = pd.read_csv(csv_path)
+        logger.info("Loading %d verses from CSV...", len(df))
         st.info(f"📊 Loading {len(df)} verses...")
         
         # Create simple documents
@@ -61,11 +82,13 @@ def load_fast_vectorstore():
         
         # Save for future use
         vectorstore.save_local(INDEX_DIR)
+        logger.info("FAISS index created and saved to %s.", INDEX_DIR)
         st.success("✅ Index created!")
-        
+
         return vectorstore
-        
+
     except Exception as e:
+        logger.exception("Error loading/creating fast vectorstore")
         st.error(f"❌ Error: {str(e)}")
         return None
 
@@ -89,10 +112,13 @@ def load_summarizer():
 def simple_search(question, vectorstore):
     """Simple similarity search without LLM"""
     try:
+        logger.info("Question received: %r", question)
         # Search for similar documents
         docs = vectorstore.similarity_search(question, k=3)
+        logger.info("Search returned %d verse(s).", len(docs))
         return docs
     except Exception as e:
+        logger.exception("Search error for question: %r", question)
         st.error(f"❌ Search error: {str(e)}")
         return []
 

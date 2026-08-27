@@ -1,4 +1,6 @@
 import os
+import sys
+import logging
 import streamlit as st
 import pandas as pd
 from langchain_community.document_loaders import DirectoryLoader
@@ -12,6 +14,21 @@ from datasets import load_dataset
 from langchain_core.documents import Document
 import warnings
 warnings.filterwarnings("ignore")
+
+# Logging: everything also goes to app.log so it can be tailed/shown live
+# during a demo, independent of whatever terminal Streamlit happens to be in.
+LOG_FILE = "app.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode="a", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+    force=True,
+)
+logger = logging.getLogger("rag_qa_app")
 
 # Set Streamlit page config
 st.set_page_config(
@@ -62,9 +79,13 @@ def load_or_create_vectorstore():
     try:
         # Check if FAISS index exists
         if os.path.exists(INDEX_DIR) and os.path.isdir(INDEX_DIR):
+            logger.info("Existing FAISS index found at %s. Loading...", INDEX_DIR)
             st.info("📁 Loading existing FAISS index...")
+            logger.info("Loading embedding model: %s", EMBEDDING_MODEL_NAME)
             embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+            logger.info("Embedding model loaded. Deserializing FAISS index...")
             vectorstore = FAISS.load_local(INDEX_DIR, embeddings, allow_dangerous_deserialization=True)
+            logger.info("FAISS index loaded successfully.")
             return vectorstore
 
         # Check if data directory exists and has files
@@ -214,11 +235,13 @@ def load_or_create_vectorstore():
 
         # Save FAISS index for future use
         vectorstore.save_local(INDEX_DIR)
+        logger.info("FAISS index created and saved to %s.", INDEX_DIR)
         st.success("✅ FAISS index created and saved successfully!")
-        
+
         return vectorstore
-        
+
     except Exception as e:
+        logger.exception("Error loading/creating vectorstore")
         st.error(f"❌ Error loading/creating vectorstore: {str(e)}")
         return None
 
@@ -228,6 +251,7 @@ def load_llm_pipeline():
     Load the LLM pipeline. This is cached to avoid reloading the model.
     """
     try:
+        logger.info("Loading LLM pipeline: %s", LLM_MODEL_NAME)
         llm_pipeline = pipeline(
             "text2text-generation",
             model=LLM_MODEL_NAME,
@@ -239,8 +263,10 @@ def load_llm_pipeline():
             device_map="auto",  # Use best available device
             torch_dtype="auto"  # Use optimal data type
         )
+        logger.info("LLM pipeline loaded successfully.")
         return HuggingFacePipeline(pipeline=llm_pipeline)
     except Exception as e:
+        logger.exception("Error loading LLM")
         st.error(f"❌ Error loading LLM: {str(e)}")
         st.info("💡 Try using a different model or check your transformers installation.")
         return None
@@ -289,12 +315,39 @@ def get_qa_chain(vectorstore, llm):
         st.error(f"❌ Error creating QA chain: {str(e)}")
         return None
 
+def render_live_status():
+    """
+    Shows the tail of app.log directly in the sidebar so processing status
+    can be shown live in the browser without switching to the terminal.
+    """
+    st.markdown("### 📊 Live Status")
+
+    lines = []
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+    if lines:
+        st.caption(f"Last event: `{lines[-1].strip()}`")
+    else:
+        st.caption("No log entries yet — logs appear once processing starts.")
+
+    if st.button("🔄 Refresh"):
+        st.rerun()
+
+    with st.expander("📜 Live Logs (app.log)", expanded=True):
+        tail = "".join(lines[-40:]) if lines else "No logs yet."
+        st.code(tail, language="log")
+    st.caption(f"Full history: `{os.path.abspath(LOG_FILE)}`")
+
 def main():
     """
     Main application logic
     """
     # Sidebar with information
     with st.sidebar:
+        render_live_status()
+
         st.markdown("### ℹ️ About")
         st.markdown("""
         This RAG (Retrieval-Augmented Generation) application allows you to:
@@ -382,6 +435,7 @@ Max Answer Length: 50 tokens
             # Try quick keyword-based response first
             quick_answer = simple_keyword_search(user_question, vectorstore)
             if quick_answer:
+                logger.info("Question: %r -> answered via keyword shortcut.", user_question)
                 st.markdown("### ⚡ Quick Answer")
                 st.markdown(f"""
                 <div style="background-color: #e8f5e8; padding: 1rem; border-radius: 10px; border-left: 5px solid #28a745;">
@@ -400,9 +454,13 @@ Max Answer Length: 50 tokens
             
             try:
                 # Add debug information
+                logger.info("Question received: %r", user_question)
                 st.info(f"🔍 Processing question: {user_question}")
                 result = qa_chain({"query": user_question})
-                
+                logger.info("Answer generated (%d chars), %d source doc(s).",
+                            len(result.get('result', '') or ''),
+                            len(result.get('source_documents', []) or []))
+
                 # Check if we got a valid result
                 if not result or not result.get('result'):
                     st.warning("⚠️ No answer generated. The model might be having issues.")
@@ -437,6 +495,7 @@ Max Answer Length: 50 tokens
                     st.info("ℹ️ No source documents returned.")
                 
             except Exception as e:
+                logger.exception("Error processing question: %r", user_question)
                 st.error(f"❌ Error processing question: {str(e)}")
                 st.info("💡 This might be due to model limitations or input length issues.")
 
